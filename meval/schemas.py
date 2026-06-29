@@ -8,10 +8,11 @@ class ModelConfig(BaseModel):
     model_name: str = Field(default="", description="Name of the model or HF repository ID (e.g. Qwen/Qwen3.6-27B)")
     device_map: str = Field(default="auto", description="Device mapping strategy for HF backend (e.g. 'auto', 'cuda:0', 'cpu')")
     torch_dtype: str = Field(default="bfloat16", description="Torch dtype for HF backend (e.g. 'bfloat16', 'float16', 'float32')")
-    temperature: float = Field(default=0.0, ge=0.0, le=2.0, description="Temperature for generation (recommend 0.0 for judges)")
+    temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0, description="Temperature for generation (recommend 0.0 for judges)")
     max_tokens: int = Field(default=1024, description="Maximum number of tokens to generate")
     steering: Optional[Dict[str, float]] = Field(default=None, description="Dynamic steering vector overrides for steerable-model-runner (for api backend)")
     headers: Optional[Dict[str, str]] = Field(default=None, description="Custom HTTP headers (e.g., Authorization: Bearer ...) (for api backend)")
+    api_key: Optional[str] = Field(default=None, description="API key for authentication (defaults to OPENAI_API_KEY environment variable if not specified) (for api backend)")
 
 class EvalRecord(BaseModel):
     """Representing a single source record to be evaluated."""

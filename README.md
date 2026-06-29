@@ -50,6 +50,7 @@ judge_config = ModelConfig(
 # judge_config = ModelConfig(
 #     backend="api",
 #     api_url="http://localhost:8001/v1",
+#     api_key="your-api-key",            # Optional API key (defaults to OPENAI_API_KEY env var)
 #     model_name="Qwen/Qwen3.6-27B",
 #     temperature=0.0
 # )
@@ -168,6 +169,7 @@ for key, mean_rank in summary.metrics["mean_ranks"].items():
 | `--judge-backend` | Backend type: `api` or `hf`. | `api` |
 | `--judge-url` | Base URL of OpenAI-compatible judge server (for `api` backend). | `http://localhost:8000/v1` |
 | `--judge-model` | Model name / HF repo ID of the judge. | `""` |
+| `--judge-api-key` | API key/token for the judge API (or uses `OPENAI_API_KEY` env var). | - |
 | `--device-map` | Device mapping for local HF backend. | `auto` |
 | `--torch-dtype` | PyTorch dtype for local HF backend. | `bfloat16` |
 | `--judge-temp` | Temperature for the judge model. | `0.0` |

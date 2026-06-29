@@ -97,9 +97,10 @@ def parse_args():
     )
     parser.add_argument("--judge-url", default="http://localhost:8000/v1", help="API base URL for judge completions (for 'api' backend)")
     parser.add_argument("--judge-model", default="", help="Model name / repo ID of the judge LLM")
+    parser.add_argument("--judge-api-key", default=None, help="API key for the judge API endpoint (defaults to OPENAI_API_KEY environment variable)")
     parser.add_argument("--device-map", default="auto", help="Device mapping strategy for HF backend (e.g. 'auto', 'cuda:0', 'cpu')")
     parser.add_argument("--torch-dtype", default="bfloat16", help="Torch dtype for HF backend (e.g. 'bfloat16', 'float16', 'float32')")
-    parser.add_argument("--judge-temp", type=float, default=0.0, help="Temperature for judge completions")
+    parser.add_argument("--judge-temp", type=float, default=None, help="Temperature for judge completions (defaults to None, letting the model backend use its own default)")
     parser.add_argument("--judge-max-tokens", type=int, default=1024, help="Max tokens for judge response")
     parser.add_argument("--max-workers", type=int, default=4, help="Number of concurrent judge request workers")
 
@@ -138,6 +139,7 @@ def main():
     judge_config = ModelConfig(
         backend=args.judge_backend,
         api_url=args.judge_url,
+        api_key=args.judge_api_key,
         model_name=args.judge_model,
         device_map=args.device_map,
         torch_dtype=args.torch_dtype,

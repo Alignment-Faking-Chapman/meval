@@ -1,4 +1,5 @@
 import json
+import os
 import urllib.request
 import urllib.error
 from abc import ABC, abstractmethod
@@ -28,11 +29,18 @@ class APIBackend(LLMBackend):
 
     def _post(self, path: str, payload: Dict[str, Any], timeout: float = 180.0) -> Dict[str, Any]:
         """Send a HTTP POST request to the API."""
-        url = self.config.api_url.rstrip("/") + "/" + path.lstrip("/")
+        if path:
+            url = self.config.api_url.rstrip("/") + "/" + path.lstrip("/")
+        else:
+            url = self.config.api_url
         
         headers = {
             "Content-Type": "application/json",
         }
+        api_key = self.config.api_key or os.getenv("OPENAI_API_KEY")
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+            headers["api-key"] = api_key
         if self.config.headers:
             headers.update(self.config.headers)
 
@@ -47,7 +55,14 @@ class APIBackend(LLMBackend):
             error_body = e.read().decode("utf-8")
             try:
                 error_json = json.loads(error_body)
-                detail = error_json.get("detail", error_body)
+                if isinstance(error_json, dict) and "error" in error_json:
+                    err = error_json["error"]
+                    if isinstance(err, dict) and "message" in err:
+                        detail = err["message"]
+                    else:
+                        detail = str(err)
+                else:
+                    detail = error_json.get("detail", error_body)
             except Exception:
                 detail = error_body
             raise RuntimeError(f"HTTP Error {e.code} from {url}: {detail}") from e
@@ -56,9 +71,16 @@ class APIBackend(LLMBackend):
 
     def _get(self, path: str, timeout: float = 30.0) -> Dict[str, Any]:
         """Send a HTTP GET request to the API."""
-        url = self.config.api_url.rstrip("/") + "/" + path.lstrip("/")
+        if path:
+            url = self.config.api_url.rstrip("/") + "/" + path.lstrip("/")
+        else:
+            url = self.config.api_url
         
         headers = {}
+        api_key = self.config.api_key or os.getenv("OPENAI_API_KEY")
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+            headers["api-key"] = api_key
         if self.config.headers:
             headers.update(self.config.headers)
 
@@ -70,9 +92,67 @@ class APIBackend(LLMBackend):
                 return json.loads(resp_data)
         except urllib.error.HTTPError as e:
             error_body = e.read().decode("utf-8")
-            raise RuntimeError(f"HTTP Error {e.code} from {url}: {error_body}") from e
+            try:
+                error_json = json.loads(error_body)
+                if isinstance(error_json, dict) and "error" in error_json:
+                    err = error_json["error"]
+                    if isinstance(err, dict) and "message" in err:
+                        detail = err["message"]
+                    else:
+                        detail = str(err)
+                else:
+                    detail = error_json.get("detail", error_body)
+            except Exception:
+                detail = error_body
+            raise RuntimeError(f"HTTP Error {e.code} from {url}: {detail}") from e
         except urllib.error.URLError as e:
             raise RuntimeError(f"Failed to reach API server at {url}: {e.reason}") from e
+
+    def _extract_text_from_output(self, output_list: List[Dict[str, Any]]) -> str:
+        """Extract textual content from Responses API output blocks."""
+        parts = []
+        for item in output_list:
+            if not isinstance(item, dict):
+                continue
+            
+            item_type = item.get("type")
+            
+            # Case 1: type is text
+            if item_type == "text":
+                content = item.get("content")
+                if isinstance(content, str):
+                    parts.append(content)
+                    
+            # Case 2: type is output_text
+            elif item_type == "output_text":
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+                    
+            # Case 3: type is message
+            elif item_type == "message":
+                content = item.get("content")
+                if isinstance(content, str):
+                    parts.append(content)
+                elif isinstance(content, list):
+                    for sub_item in content:
+                        if not isinstance(sub_item, dict):
+                            continue
+                        sub_type = sub_item.get("type")
+                        if sub_type in ("text", "output_text"):
+                            sub_content = sub_item.get("content") or sub_item.get("text")
+                            if isinstance(sub_content, str):
+                                parts.append(sub_content)
+                        elif "text" in sub_item and isinstance(sub_item["text"], str):
+                            parts.append(sub_item["text"])
+                            
+            # General fallback if there is a 'content' or 'text' field directly
+            elif "content" in item and isinstance(item["content"], str):
+                parts.append(item["content"])
+            elif "text" in item and isinstance(item["text"], str):
+                parts.append(item["text"])
+                
+        return "".join(parts)
 
     def generate(
         self, 
@@ -84,12 +164,22 @@ class APIBackend(LLMBackend):
         # Determine active steering vector (overrides take precedence)
         steering = steering_override if steering_override is not None else self.config.steering
         
+        is_responses_api = "responses" in self.config.api_url.lower()
+
         payload = {
-            "messages": messages,
-            "temperature": temperature_override if temperature_override is not None else self.config.temperature,
-            "max_tokens": max_tokens_override if max_tokens_override is not None else self.config.max_tokens,
             "stream": False,
         }
+
+        temp = temperature_override if temperature_override is not None else self.config.temperature
+        if temp is not None:
+            payload["temperature"] = temp
+
+        if is_responses_api:
+            payload["input"] = messages
+            payload["max_output_tokens"] = max_tokens_override if max_tokens_override is not None else self.config.max_tokens
+        else:
+            payload["messages"] = messages
+            payload["max_tokens"] = max_tokens_override if max_tokens_override is not None else self.config.max_tokens
 
         if self.config.model_name:
             payload["model"] = self.config.model_name
@@ -97,12 +187,43 @@ class APIBackend(LLMBackend):
         if steering is not None:
             payload["steering"] = steering
 
-        response = self._post("chat/completions", payload)
-        
-        try:
-            return response["choices"][0]["message"]["content"]
-        except (KeyError, IndexError) as e:
-            raise RuntimeError(f"Malformed response format from API: {response}") from e
+        if is_responses_api:
+            response = self._post("", payload)
+        else:
+            response = self._post("chat/completions", payload)
+
+        if isinstance(response, dict) and response.get("error") is not None:
+            error_obj = response["error"]
+            if isinstance(error_obj, dict) and "message" in error_obj:
+                error_msg = error_obj["message"]
+            else:
+                error_msg = str(error_obj)
+            raise RuntimeError(f"API Error: {error_msg}")
+
+        if is_responses_api:
+            
+            if "output" in response:
+                text = self._extract_text_from_output(response["output"])
+                if text:
+                    return text
+            
+            # Fallback to general parsing if output is missing or empty
+            try:
+                return response["choices"][0]["message"]["content"]
+            except (KeyError, IndexError):
+                pass
+            raise RuntimeError(f"Malformed Responses API response format: {response}")
+        else:
+            # Note: _post was already called above
+            try:
+                return response["choices"][0]["message"]["content"]
+            except (KeyError, IndexError) as e:
+                # Try fallback parsing if they used chat/completions but got responses-style format
+                if "output" in response:
+                    text = self._extract_text_from_output(response["output"])
+                    if text:
+                        return text
+                raise RuntimeError(f"Malformed response format from API: {response}") from e
 
     def list_models(self) -> List[Dict[str, Any]]:
         """List loaded models from /v1/models endpoint."""
@@ -178,6 +299,8 @@ class HFBackend(LLMBackend):
 
         max_tokens = max_tokens_override if max_tokens_override is not None else self.config.max_tokens
         temperature = temperature_override if temperature_override is not None else self.config.temperature
+        if temperature is None:
+            temperature = 0.0
 
         gen_kwargs = {
             "input_ids": input_ids,

@@ -14,6 +14,172 @@ def clean_json_string(s: str) -> str:
     s = re.sub(r',\s*([\]}])', r'\1', s)
     return s
 
+def repair_truncated_json(s: str) -> str:
+    """
+    Attempt to repair a truncated JSON string by closing open quotes,
+    brackets, and braces. Backtracks to the last safe structural point
+    if truncation occurs in an invalid state (e.g. key without value).
+    """
+    s = s.strip()
+    if not s:
+        return s
+
+    in_quote = False
+    escape = False
+    
+    # stack elements:
+    # - ']' for lists
+    # - ['}', state] for dicts, where state can be:
+    #   'key' (expecting a key)
+    #   'colon' (expecting colon)
+    #   'value' (expecting a value)
+    #   'comma' (expecting comma or closing brace)
+    stack = []
+    
+    # Track the position of the last safe state and the stack configuration at that position.
+    # Initially, if the string starts with '{' or '[', it's safe to just close it immediately.
+    safe_index = 0
+    safe_stack = []
+    
+    i = 0
+    n = len(s)
+    
+    while i < n:
+        char = s[i]
+        
+        if escape:
+            escape = False
+            i += 1
+            continue
+            
+        if char == '\\':
+            escape = True
+            i += 1
+            continue
+            
+        if char == '"':
+            in_quote = not in_quote
+            if not in_quote:
+                # Finished a string. Update object state if applicable.
+                if stack and isinstance(stack[-1], list) and stack[-1][0] == '}':
+                    current_obj = stack[-1]
+                    if current_obj[1] == 'key':
+                        current_obj[1] = 'colon'
+                    elif current_obj[1] == 'value':
+                        current_obj[1] = 'comma'
+                        # Completed a key-value pair, which is a safe truncation point.
+                        safe_index = i + 1
+                        safe_stack = [list(item) if isinstance(item, list) else item for item in stack]
+            i += 1
+            continue
+            
+        if in_quote:
+            i += 1
+            continue
+            
+        if char.isspace():
+            i += 1
+            continue
+            
+        if char == '{':
+            stack.append(['}', 'key'])
+            # Empty dict is safe.
+            safe_index = i + 1
+            safe_stack = [list(item) if isinstance(item, list) else item for item in stack]
+            
+        elif char == '[':
+            stack.append(']')
+            # Empty list is safe.
+            safe_index = i + 1
+            safe_stack = [list(item) if isinstance(item, list) else item for item in stack]
+            
+        elif char == '}':
+            if stack and isinstance(stack[-1], list) and stack[-1][0] == '}':
+                stack.pop()
+                if stack and isinstance(stack[-1], list) and stack[-1][0] == '}':
+                    stack[-1][1] = 'comma'
+                safe_index = i + 1
+                safe_stack = [list(item) if isinstance(item, list) else item for item in stack]
+                
+        elif char == ']':
+            if stack and stack[-1] == ']':
+                stack.pop()
+                if stack and isinstance(stack[-1], list) and stack[-1][0] == '}':
+                    stack[-1][1] = 'comma'
+                safe_index = i + 1
+                safe_stack = [list(item) if isinstance(item, list) else item for item in stack]
+                
+        elif char == ':':
+            if stack and isinstance(stack[-1], list) and stack[-1][0] == '}':
+                if stack[-1][1] == 'colon':
+                    stack[-1][1] = 'value'
+                    
+        elif char == ',':
+            if stack and isinstance(stack[-1], list) and stack[-1][0] == '}':
+                if stack[-1][1] == 'comma':
+                    stack[-1][1] = 'key'
+            # Commas aren't a safe truncation point because trailing commas are invalid JSON.
+            
+        else:
+            # Token literal (number, boolean, null)
+            if stack and isinstance(stack[-1], list) and stack[-1][0] == '}':
+                if stack[-1][1] == 'value':
+                    token_chars = []
+                    while i < n and (s[i].isalnum() or s[i] in ('.', '-', '+')):
+                        token_chars.append(s[i])
+                        i += 1
+                    stack[-1][1] = 'comma'
+                    safe_index = i
+                    safe_stack = [list(item) if isinstance(item, list) else item for item in stack]
+                    continue
+            elif stack and stack[-1] == ']':
+                while i < n and (s[i].isalnum() or s[i] in ('.', '-', '+')):
+                    i += 1
+                safe_index = i
+                safe_stack = [list(item) if isinstance(item, list) else item for item in stack]
+                continue
+                
+        i += 1
+
+    # Check if we can safely close the quote and remaining containers
+    if in_quote:
+        can_close_quote = False
+        if stack:
+            if stack[-1] == ']':
+                can_close_quote = True
+            elif isinstance(stack[-1], list) and stack[-1][0] == '}' and stack[-1][1] == 'value':
+                can_close_quote = True
+                
+        if can_close_quote:
+            repaired = s + '"'
+            for item in reversed(stack):
+                if isinstance(item, list):
+                    repaired += item[0]
+                else:
+                    repaired += item
+            return repaired
+            
+    # Backtrack to the last known safe state if we ended in an invalid state
+    if safe_index > 0:
+        repaired = s[:safe_index]
+        for item in reversed(safe_stack):
+            if isinstance(item, list):
+                repaired += item[0]
+            else:
+                repaired += item
+        return repaired
+
+    # Ultimate fallback
+    repaired = s
+    if in_quote:
+        repaired += '"'
+    for item in reversed(stack):
+        if isinstance(item, list):
+            repaired += item[0]
+        else:
+            repaired += item
+    return repaired
+
 def extract_json_response(text: str) -> Dict[str, Any]:
     """Robust parser that extracts a JSON object from text, handling codeblocks and extra strings."""
     trimmed = text.strip()
@@ -23,7 +189,7 @@ def extract_json_response(text: str) -> Dict[str, Any]:
     if codeblock_match:
         json_str = codeblock_match.group(1)
         try:
-            return json.loads(clean_json_string(json_str))
+            return json.loads(clean_json_string(json_str), strict=False)
         except json.JSONDecodeError:
             pass
 
@@ -31,19 +197,27 @@ def extract_json_response(text: str) -> Dict[str, Any]:
     first_brace = trimmed.find('{')
     last_brace = trimmed.rfind('}')
     
-    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
-        json_str = trimmed[first_brace:last_brace + 1]
-        try:
-            return json.loads(clean_json_string(json_str))
-        except json.JSONDecodeError as e:
-            # Try to double-clean
+    if first_brace != -1:
+        if last_brace != -1 and last_brace > first_brace:
+            json_str = trimmed[first_brace:last_brace + 1]
             try:
-                # Remove common non-json formatting or trailing commas inside arrays
-                cleaned = clean_json_string(json_str)
-                return json.loads(cleaned)
-            except Exception:
-                raise ValueError(f"Failed to parse extracted JSON block from text. Decode error: {e}. Raw block:\n{json_str}") from e
-    
+                return json.loads(clean_json_string(json_str), strict=False)
+            except json.JSONDecodeError:
+                # Try to repair it if normal parse failed
+                try:
+                    repaired = repair_truncated_json(json_str)
+                    return json.loads(clean_json_string(repaired), strict=False)
+                except Exception:
+                    pass
+        
+        # If no closed brace was found or parsing failed, try parsing from first_brace to the end of the text after repairing it
+        json_str = trimmed[first_brace:]
+        try:
+            repaired = repair_truncated_json(json_str)
+            return json.loads(clean_json_string(repaired), strict=False)
+        except Exception as e:
+            raise ValueError(f"No JSON object (wrapped in {{}}) could be found in the LLM response (tried repairing):\n{text}") from e
+            
     raise ValueError(f"No JSON object (wrapped in {{}}) could be found in the LLM response:\n{text}")
 
 class LLMBaseJudge(ABC):
